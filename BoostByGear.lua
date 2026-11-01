@@ -1,9 +1,26 @@
--- BoostByGear by GARV (V3.1 — "Liquid Glass")
--- Core boost/gear logic: unchanged from Stable V1.0.
+-- BoostByGear by GARV (V3.2 — "Liquid Glass")
+-- Core boost/gear logic: unchanged from Stable V1.0 (V3.2 only adds guards).
 -- UI: Liquid Glass iOS-26-inspired theme — ultra-low-opacity glass panes,
 -- hairline molded edges, full capsule rounding, neon holographic readouts.
 -- NOTE: CSP's app UI layer cannot blur the 3D scene behind a window; the glass
 -- effect is approximated with translucent layering + sheen + edge highlights.
+--
+-- V3.2 CHANGES — QUALITY OF LIFE:
+--  * The master switch is REMEMBERED: once BOOST CONTROL is on it stays on
+--    across sessions and lobbies until you switch it off ([SETTINGS] ACTIVE
+--    in config.ini). A toast tells you when the limiter comes back on.
+--  * HOTKEY: bind a key or a wheel/gamepad button to toggle the limiter from
+--    the bottom row. CSP stores the binding in controls.ini; it works while
+--    the window is closed and a toast confirms each toggle.
+--  * applyBoost() nil-guards the car and only calls ac.setTurboBoost when the
+--    running CSP build actually exposes it — CSP's public API has no such
+--    function, so the call raised a Lua error on every active frame. Cars
+--    with no turbo, or a turbo AC doesn't let apps adjust, now say so in the
+--    status capsule instead of silently doing nothing.
+--  * Honest window semantics: CSP keeps calling update() while the window is
+--    hidden (default LAZY mode), so the switch — not the window — decides
+--    whether boost is limited. ac.onRelease still restores full boost when
+--    the script itself unloads (session end, CSP reload).
 --
 -- V3.1 CHANGES — REVIEW FIXES:
 --  * SAFETY: ac.onRelease restores 100% boost if the app unloads while the
@@ -18,9 +35,9 @@
 --  * Master-switch animation is framerate-independent.
 
 ------------------------------------------------------------------------------
--- CORE LOGIC (UNTOUCHED — V1.0)
+-- CORE LOGIC (V1.0 — V3.2 adds only guards, the hotkey poll and a toast)
 ------------------------------------------------------------------------------
-local boostActive = false -- Master switch
+local boostActive = false -- Master switch (V3.2: restored from config.ini below)
 
 -- Default Settings (Percent)
 local gear1 = 50
@@ -32,7 +49,41 @@ local gear5 = 100
 local currentTarget = 50
 local currentGear = 0
 
+-- V3.2: toast helper — safe on CSP builds without ui.toast / ui.Icons
+local function uiIcon(name)
+    local ok, icon = pcall(function() return ui.Icons[name] end)
+    if ok and icon ~= nil then return icon end
+    return nil
+end
+local ICON_ON  = uiIcon('Confirm') or uiIcon('Settings')
+local ICON_OFF = uiIcon('Cancel') or uiIcon('Settings')
+
+local function notify(message, isOn)
+    if type(ui.toast) ~= 'function' then return end
+    pcall(ui.toast, isOn and ICON_ON or ICON_OFF, message)
+end
+
+-- V3.2: physics-only car fields, read defensively (older builds may lack them)
+local function readTurboInfo(car)
+    return car.turboCount, car.adjustableTurbo
+end
+
+-- V3.2: if the switch came back ON from the previous session, say so once —
+-- after a couple of seconds with a car, so it isn't lost on the loading screen
+local restoreNotice = false
+local restoreTimer  = 0
+
+-- V3.2: optional hotkey (ac.ControlButton); created once config is loaded
+local toggleHotkey    = nil
+local hotkeyWidgetOk  = true
+local setActive                 -- defined with the config code further down
+
 function update(dt)
+    -- V3.2: hotkey toggle — polled here so it works with the window closed
+    if toggleHotkey ~= nil and toggleHotkey:pressed() then
+        setActive(not boostActive, true)
+    end
+
     -- Only run logic if the "Active" box is checked
     if boostActive then
         local car = ac.getCar(0)
@@ -54,17 +105,32 @@ function update(dt)
 
         -- Apply the Boost
         applyBoost(currentTarget)
+
+        -- V3.2: one-time "still on from last session" reminder
+        if restoreNotice then
+            restoreTimer = restoreTimer + (tonumber(dt) or 0)
+            if restoreTimer >= 2 then
+                restoreNotice = false
+                notify('Boost by Gear: limiter is still ON from your last session', true)
+            end
+        end
     end
 end
 
 function applyBoost(valInt)
+    local car = ac.getCar(0)
+    if car == nil then return end  -- V3.2: onRelease can fire with no car left
     local valDecimal = valInt / 100
 
     -- Force both systems (Wastegate + Generic)
-    if ac.getCar(0).adjustableTurbo then
+    if car.adjustableTurbo then
         ac.setTurboWastegate(valDecimal)
     end
-    ac.setTurboBoost(valDecimal)
+    -- V3.2: CSP's public API only documents setTurboWastegate; call the generic
+    -- setter only if this build has it instead of erroring every frame
+    if type(ac.setTurboBoost) == 'function' then
+        ac.setTurboBoost(valDecimal)
+    end
 end
 
 ------------------------------------------------------------------------------
@@ -87,7 +153,13 @@ gear3 = sanitizeBoost(config:get('BOOST_PER_GEAR', 'GEAR_3', gear3), 70)
 gear4 = sanitizeBoost(config:get('BOOST_PER_GEAR', 'GEAR_4', gear4), 100)
 gear5 = sanitizeBoost(config:get('BOOST_PER_GEAR', 'GEAR_5', gear5), 100)
 
+-- V3.2: the master switch is remembered too (stored as 1/0 so a hand edit of
+-- "true"/"false" can't accidentally read as ON)
+boostActive   = (tonumber(config:get('SETTINGS', 'ACTIVE', 0)) or 0) ~= 0
+restoreNotice = boostActive
+
 local saved1, saved2, saved3, saved4, saved5 = gear1, gear2, gear3, gear4, gear5
+local savedActive = boostActive
 
 local function saveConfig()
     config:set('BOOST_PER_GEAR', 'GEAR_1', gear1)
@@ -95,8 +167,42 @@ local function saveConfig()
     config:set('BOOST_PER_GEAR', 'GEAR_3', gear3)
     config:set('BOOST_PER_GEAR', 'GEAR_4', gear4)
     config:set('BOOST_PER_GEAR', 'GEAR_5', gear5)
+    config:set('SETTINGS', 'ACTIVE', boostActive and 1 or 0)
     config:save(CONFIG_FILE)
     saved1, saved2, saved3, saved4, saved5 = gear1, gear2, gear3, gear4, gear5
+    savedActive = boostActive
+end
+
+local function configDirty()
+    return gear1 ~= saved1 or gear2 ~= saved2 or gear3 ~= saved3
+        or gear4 ~= saved4 or gear5 ~= saved5 or boostActive ~= savedActive
+end
+
+-- V3.2: the one place that flips the master switch — used by the UI capsule
+-- and the hotkey. Saves straight away: a toggle is a one-off event, not a drag.
+function setActive(state, viaHotkey)
+    state = state and true or false
+    if state == boostActive then return end
+    boostActive   = state
+    restoreNotice = false
+    if not boostActive then
+        applyBoost(100) -- Reset to normal (100%) if turned off (as in V1.0)
+    end
+    saveConfig()
+    if viaHotkey then
+        notify(boostActive and 'Boost by Gear: limiter ON'
+            or 'Boost by Gear: limiter OFF — full boost', boostActive)
+    end
+end
+
+-- V3.2: HOTKEY. CSP keeps the binding in controls.ini under this ID; the user
+-- assigns it from the HOTKEY row. No default key, so nothing can clash.
+if type(ac.ControlButton) == 'function' then
+    local ok, btn = pcall(ac.ControlButton, 'BoostByGear/Toggle boost control')
+    if ok and btn ~= nil then
+        toggleHotkey = btn
+        pcall(function() btn:setAlwaysActive(true) end) -- usable in pits/pause too
+    end
 end
 
 -- V3.1: if the script unloads while the limiter is active (window closed,
@@ -106,10 +212,7 @@ end
 if type(ac.onRelease) == 'function' then
     ac.onRelease(function()
         if boostActive then applyBoost(100) end
-        if gear1 ~= saved1 or gear2 ~= saved2 or gear3 ~= saved3
-            or gear4 ~= saved4 or gear5 ~= saved5 then
-            saveConfig()
-        end
+        if configDirty() then saveConfig() end
     end)
 end
 
@@ -141,6 +244,7 @@ local NEON_GREEN_LO = rgbm(0.35, 1.00, 0.55, 0.22)
 local NEON_AMBER    = rgbm(1.00, 0.80, 0.25, 1)
 local NEON_RED      = rgbm(1.00, 0.28, 0.35, 1)
 local C_PILL_ON     = rgbm(0.35, 1.00, 0.55, 0.10)
+local C_PILL_WARN   = rgbm(1.00, 0.80, 0.25, 0.10)  -- V3.2: "can't limit this car"
 
 local C_TEXT        = rgbm(1, 1, 1, 1)
 local C_TEXT_DIM    = rgbm(0.75, 0.80, 0.90, 0.55)  -- cool frosted dim
@@ -152,7 +256,7 @@ local LEFT_PAD = 8
 local PANEL_R  = 18
 local BASE_W   = 340
 local WIN_W    = BASE_W + PAD * 2
-local WIN_H    = 472
+local WIN_H    = 494  -- V3.2: +22 for the HOTKEY row (manifest SIZE matches)
 
 -- Helpers
 local function remap(v, lo, hi, nlo, nhi)
@@ -291,10 +395,27 @@ function drawUI()
     -- Status capsule (transparent glass, neon edge when live)
     local statusStr = boostActive and "ACTIVE" or "DISABLED"
     local statusCol = boostActive and NEON_GREEN or C_TEXT_DIM
+    local pillFill  = boostActive and C_PILL_ON or C_TRACK
+    local pillEdge  = boostActive and NEON_GREEN or C_TRACK_EDGE
+    -- V3.2: warn when this car's boost can't actually be limited — no turbo at
+    -- all, or a turbo AC doesn't expose as adjustable (and no generic setter)
+    if boostActive then
+        local infoOk, turboCount, adjustable = pcall(readTurboInfo, car)
+        if infoOk then
+            if turboCount == 0 then
+                statusStr = "NO TURBO"
+            elseif not adjustable and type(ac.setTurboBoost) ~= 'function' then
+                statusStr = "TURBO LOCKED"
+            end
+            if statusStr ~= "ACTIVE" then
+                statusCol, pillFill, pillEdge = NEON_AMBER, C_PILL_WARN, NEON_AMBER
+            end
+        end
+    end
     local sM = measureCached(statusStr, 12)
     local pillW = sM.x + 20
-    rectFilled(cx1 - pillW, 14, cx1, 34, boostActive and C_PILL_ON or C_TRACK, 10)
-    rectStroke(cx1 - pillW, 14, cx1, 34, boostActive and NEON_GREEN or C_TRACK_EDGE, 10, 1)
+    rectFilled(cx1 - pillW, 14, cx1, 34, pillFill, 10)
+    rectStroke(cx1 - pillW, 14, cx1, 34, pillEdge, 10, 1)
     ui.dwriteDrawText(statusStr, 12, vec2(cx1 - pillW + 10, 18), statusCol)
 
     -- Hairline separator
@@ -424,11 +545,7 @@ function drawUI()
     ui.invisibleButton('##master', vec2(200, 26))
     local hovered = ui.itemHovered()
     if ui.itemClicked() then
-        boostActive = not boostActive
-        -- Reset to normal (100%) if turned off
-        if not boostActive then
-            applyBoost(100)
-        end
+        setActive(not boostActive, false) -- V3.2: shared path (restores 100% + saves)
     end
 
     -- V3.1: dt-based easing (12/s ≈ the old 0.2/frame at 60 fps) so the switch
@@ -443,14 +560,34 @@ function drawUI()
     ui.dwriteDrawText("BOOST CONTROL", 13, vec2(cx0 + 58, ty + 5),
         boostActive and C_TEXT or C_TEXT_DIM)
 
+    -- V3.2: HOTKEY ROW — CSP's own binding widget dressed as a glass capsule.
+    -- Click it, press a key / wheel / gamepad button; hover + Delete to unbind.
+    local hy = ty + 34
+    ui.dwriteDrawText("HOTKEY", 11, vec2(cx0, hy + 5), C_TEXT_DIM)
+    if toggleHotkey ~= nil and hotkeyWidgetOk then
+        ui.pushStyleVar(ui.StyleVar.FrameRounding, 11)
+        ui.pushStyleVar(ui.StyleVar.FrameBorderSize, 1)
+        ui.pushStyleColor(ui.StyleColor.Button, C_TRACK)
+        ui.pushStyleColor(ui.StyleColor.ButtonHovered, C_TRACK_HOVER)
+        ui.pushStyleColor(ui.StyleColor.ButtonActive, C_TRACK_ACT)
+        ui.pushStyleColor(ui.StyleColor.Border, C_TRACK_EDGE)
+        ui.pushStyleColor(ui.StyleColor.Text, C_TEXT)
+        ui.setCursor(vec2(cx0 + 58, hy))
+        hotkeyWidgetOk = pcall(toggleHotkey.control, toggleHotkey,
+            vec2(cx1 - cx0 - 58, 22), nil, 'Click to bind a key or button')
+        ui.popStyleColor(5)
+        ui.popStyleVar(2)
+    else
+        ui.dwriteDrawText(toggleHotkey == nil and "needs a newer CSP build"
+            or "binding widget unavailable", 11, vec2(cx0 + 58, hy + 5), C_TEXT_DIM)
+    end
+
     ui.popDWriteFont()
     ui.popStyleVar(2)
 
     -- AUTO-SAVE (UNCHANGED from V2.0): write config.ini only when a value
     -- actually changed AND the mouse button is up — never per-frame.
-    if (gear1 ~= saved1 or gear2 ~= saved2 or gear3 ~= saved3
-        or gear4 ~= saved4 or gear5 ~= saved5)
-        and not ui.mouseDown(ui.MouseButton.Left) then
+    if configDirty() and not ui.mouseDown(ui.MouseButton.Left) then
         saveConfig()
     end
 
