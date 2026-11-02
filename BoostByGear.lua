@@ -1,9 +1,18 @@
--- BoostByGear by GARV (V3.3 — "Liquid Glass")
+-- BoostByGear by GARV (V3.4 — "Liquid Glass")
 -- Core boost/gear logic: unchanged from Stable V1.0 (V3.2 only adds guards).
 -- UI: Liquid Glass iOS-26-inspired theme — ultra-low-opacity glass panes,
 -- hairline molded edges, full capsule rounding, neon holographic readouts.
 -- NOTE: CSP's app UI layer cannot blur the 3D scene behind a window; the glass
 -- effect is approximated with translucent layering + sheen + edge highlights.
+--
+-- V3.4 CHANGE — SUITE BUS:
+--  * Publishes the per-gear table on the shared struct 'garv.boostbygear.v1'
+--    that the sibling GripLaunch app (1.6.2+) already listens for: a byte
+--    heartbeat, the master switch, the % requested for the current gear and
+--    the five gear values. GripLaunch records them in its captures and resets
+--    its speed-window comparisons when the boost table changes, so runs with
+--    different boost maps are never compared as equals. Layout must match
+--    GripLaunch byte for byte — bump the key in both apps to change it.
 --
 -- V3.3 CHANGE — THE WINDOW BUG:
 --  * update(dt) is now script.update(dt). CSP only drives the legacy global
@@ -88,12 +97,44 @@ local toggleHotkey    = nil
 local hotkeyWidgetOk  = true
 local setActive                 -- defined with the config code further down
 
+-- V3.4: SUITE BUS — what GripLaunch reads. Fully guarded: a build without
+-- ac.connect runs standalone. Heartbeat progress is how GripLaunch tells a
+-- live publisher from a zero-filled struct, so bbgSeq advances every frame.
+local bbgBus = nil
+if type(ac.connect) == 'function' then
+    local ok, res = pcall(function()
+        return ac.connect({
+            ac.StructItem.key('garv.boostbygear.v1'),
+            bbgSeq    = ac.StructItem.byte(),     -- heartbeat, wraps at 256
+            bbgActive = ac.StructItem.byte(),     -- master switch
+            bbgTarget = ac.StructItem.byte(),     -- % requested for the current gear
+            bbgGear1  = ac.StructItem.byte(),
+            bbgGear2  = ac.StructItem.byte(),
+            bbgGear3  = ac.StructItem.byte(),
+            bbgGear4  = ac.StructItem.byte(),
+            bbgGear5  = ac.StructItem.byte(),
+        }, false, ac.SharedNamespace.Shared)
+    end)
+    if ok then bbgBus = res end
+end
+
+local function publishBus()
+    if bbgBus == nil then return end
+    bbgBus.bbgSeq    = (bbgBus.bbgSeq + 1) % 256
+    bbgBus.bbgActive = boostActive and 1 or 0
+    bbgBus.bbgTarget = boostActive and currentTarget or 100   -- 100 = full boost, what the car gets when off
+    bbgBus.bbgGear1, bbgBus.bbgGear2, bbgBus.bbgGear3 = gear1, gear2, gear3
+    bbgBus.bbgGear4, bbgBus.bbgGear5 = gear4, gear5
+end
+
 function script.update(dt)
     -- V3.2: hotkey toggle — polled here so it works with the window closed
     -- (V3.3: script.update, not the global update — see the header)
     if toggleHotkey ~= nil and toggleHotkey:pressed() then
         setActive(not boostActive, true)
     end
+
+    publishBus()   -- V3.4: GripLaunch reads this every frame, switch on or off
 
     -- Only run logic if the "Active" box is checked
     if boostActive then
