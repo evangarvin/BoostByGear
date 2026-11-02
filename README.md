@@ -68,7 +68,8 @@ automatically and reloaded the next time the app starts.
 - **Closing the window doesn't change anything.** CSP keeps running the app
   while its window is hidden, so the switch — not the window — decides
   whether boost is limited. Use the hotkey or reopen the window to turn it
-  off.
+  off. (Needs 3.3 or newer: earlier versions stopped applying the limiter
+  when the window closed, leaving the last gear's setting in place.)
 - **Unloading restores full boost.** When the script itself unloads
   (leaving the session, a CSP Lua reload) the app sets the wastegate back to
   100% so the car is never left clamped; if the switch was on it re-applies
